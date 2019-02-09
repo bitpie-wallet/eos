@@ -205,6 +205,21 @@ public:
    static const std::string accounts_col;
    static const std::string pub_keys_col;
    static const std::string account_controls_col;
+
+   std::set<name> filter_accounts;
+   boost::shared_mutex filter_mutex;
+   int32_t filter_on_accounts(const vector<chain::account_name> &account_names) {
+       int cnt = 0;
+       filter_mutex.lock();
+       for (auto const &account_name : account_names) {
+           auto r = filter_accounts.insert(account_name);
+           if (r.second)
+               ++cnt;
+       }
+       filter_mutex.unlock();
+       ilog( "filter_on_accounts, new accounts: ${cnt}", ("cnt", cnt) );
+       return cnt;
+   }
 };
 
 const action_name mongo_db_plugin_impl::newaccount = chain::newaccount::get_name();
@@ -1724,4 +1739,54 @@ void mongo_db_plugin::plugin_shutdown()
    my.reset();
 }
 
+namespace mongo_db_apis {
+
+   read_write::filter_on_accounts_result read_write::filter_on_accounts( const read_write::filter_on_accounts_params& params)const {
+      filter_on_accounts_result result;
+      result.new_accounts = mongo_db->filter_on_accounts(params.account_names);
+      return result;
+   }
+}
+
 } // namespace eosio
+
+namespace eosio {
+
+    using namespace eosio;
+
+    static appbase::abstract_plugin& _mongo_db_api_plugin = app().register_plugin<mongo_db_api_plugin>();
+
+    mongo_db_api_plugin::mongo_db_api_plugin(){}
+    mongo_db_api_plugin::~mongo_db_api_plugin(){}
+
+    void mongo_db_api_plugin::set_program_options(options_description&, options_description&) {}
+    void mongo_db_api_plugin::plugin_initialize(const variables_map&) {}
+
+#define CALL(api_name, api_handle, api_namespace, call_name) \
+{std::string("/v1/" #api_name "/" #call_name), \
+   [api_handle](string, string body, url_response_callback cb) mutable { \
+          try { \
+             if (body.empty()) body = "{}"; \
+             auto result = api_handle.call_name(fc::json::from_string(body).as<api_namespace::call_name ## _params>()); \
+             cb(200, fc::json::to_string(result)); \
+          } catch (...) { \
+             http_plugin::handle_exception(#api_name, #call_name, body, cb); \
+          } \
+       }}
+
+//#define CHAIN_RO_CALL(call_name) CALL(history, ro_api, history_apis::read_only, call_name)
+#define CHAIN_RW_CALL(call_name) CALL(mongo_db, rw_api, mongo_db_apis::read_write, call_name)
+
+    void mongo_db_api_plugin::plugin_startup() {
+        ilog( "starting mongo_db_api_plugin" );
+        auto rw_api = app().get_plugin<mongo_db_plugin>().get_read_write_api();
+        //auto rw_api = app().get_plugin<history_plugin>().get_read_write_api();
+
+        app().get_plugin<http_plugin>().add_api({
+                                                        CHAIN_RW_CALL(filter_on_accounts)
+                                                });
+    }
+
+    void mongo_db_api_plugin::plugin_shutdown() {}
+
+}
