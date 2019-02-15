@@ -214,6 +214,8 @@ public:
    static const std::string pub_keys_col;
    static const std::string account_controls_col;
 
+   chain_plugin*          chain_plug = nullptr;
+
    std::set<name> filter_accounts;
    boost::shared_mutex filter_mutex;
    int32_t filter_on_accounts(const vector<chain::account_name> &account_names) {
@@ -911,17 +913,19 @@ mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_tr
    }
 
    bool added = false;
-   const bool in_filter = (store_action_traces || store_transaction_traces) && start_block_reached &&
+   const bool in_filter = (store_transfer_traces || store_transaction_traces) && start_block_reached &&
+         (atrace.act.name == name("transfer")) &&
                           filter_include( atrace.receipt.receiver, atrace.act.name, atrace.act.authorization );
    write_ttrace |= in_filter;
-   if( start_block_reached && store_action_traces && in_filter ) {
+   if( start_block_reached && store_transfer_traces && in_filter ) {
       auto transfer_traces_doc = bsoncxx::builder::basic::document{};
       const chain::base_action_trace& base = atrace; // without inline action traces
 
       // improve data distributivity when using mongodb sharding
       transfer_traces_doc.append( kvp( "_id", make_custom_oid() ) );
 
-      auto v = to_variant_with_abi( base );
+      auto& chain = chain_plug->chain();
+      auto v = chain.to_variant_with_abi(base, abi_serializer_max_time);   // to_variant_with_abi( base );
       string json = fc::json::to_string( v );
       try {
          const auto& value = bsoncxx::from_json( json );
@@ -1786,6 +1790,7 @@ void mongo_db_plugin::plugin_initialize(const variables_map& options)
          EOS_ASSERT( chain_plug, chain::missing_chain_plugin_exception, ""  );
          auto& chain = chain_plug->chain();
          my->chain_id.emplace( chain.get_chain_id());
+         my->chain_plug = chain_plug;
 
          my->accepted_block_connection.emplace( chain.accepted_block.connect( [&]( const chain::block_state_ptr& bs ) {
             my->accepted_block( bs );
