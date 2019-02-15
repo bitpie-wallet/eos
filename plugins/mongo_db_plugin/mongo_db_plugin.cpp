@@ -208,6 +208,7 @@ public:
    static const std::string trans_traces_col;
    static const std::string action_traces_col;
    static const std::string transfer_traces_col;
+   static const std::string account_filters_col;
    static const std::string accounts_col;
    static const std::string pub_keys_col;
    static const std::string account_controls_col;
@@ -216,18 +217,7 @@ public:
 
    std::set<name> filter_accounts;
    boost::shared_mutex filter_mutex;
-   int32_t filter_on_accounts(const vector<chain::account_name> &account_names) {
-       int cnt = 0;
-       filter_mutex.lock();
-       for (auto const &account_name : account_names) {
-           auto r = filter_accounts.insert(account_name);
-           if (r.second)
-               ++cnt;
-       }
-       filter_mutex.unlock();
-       ilog( "filter_on_accounts, new accounts: ${cnt}", ("cnt", cnt) );
-       return cnt;
-   }
+   int32_t filter_on_accounts(const vector<chain::account_name> &account_names);
    bool filter_include( const account_name& receiver ) const;
 };
 
@@ -244,6 +234,7 @@ const std::string mongo_db_plugin_impl::trans_col = "transactions";
 const std::string mongo_db_plugin_impl::trans_traces_col = "transaction_traces";
 const std::string mongo_db_plugin_impl::action_traces_col = "action_traces";
 const std::string mongo_db_plugin_impl::transfer_traces_col = "transfer_traces";
+const std::string mongo_db_plugin_impl::account_filters_col = "account_filters";
 const std::string mongo_db_plugin_impl::accounts_col = "accounts";
 const std::string mongo_db_plugin_impl::pub_keys_col = "pub_keys";
 const std::string mongo_db_plugin_impl::account_controls_col = "account_controls";
@@ -321,6 +312,19 @@ bool mongo_db_plugin_impl::filter_include( const account_name& receiver ) const
    if (filter_accounts.find(receiver) == filter_accounts.end())
       return false;
    return true;
+}
+
+int32_t mongo_db_plugin_impl::filter_on_accounts(const vector<chain::account_name> &account_names) {
+   int cnt = 0;
+   filter_mutex.lock();
+   for (auto const &account_name : account_names) {
+      auto r = filter_accounts.insert(account_name);
+      if (r.second)
+         ++cnt;
+   }
+   filter_mutex.unlock();
+   ilog( "filter_on_accounts, new accounts: ${cnt}", ("cnt", cnt) );
+   return cnt;
 }
 
 template<typename Queue, typename Entry>
@@ -917,6 +921,7 @@ mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_tr
    const bool in_filter = (store_transfer_traces || store_transaction_traces) && start_block_reached &&
          (atrace.act.name == name("transfer")) &&
          (act_digests.find( atrace.receipt.act_digest ) == act_digests.end()) &&
+         (atrace.producer_block_id.valid()) &&
          filter_include( atrace.receipt.receiver ) &&
                           filter_include( atrace.receipt.receiver, atrace.act.name, atrace.act.authorization );
    if( start_block_reached && store_transfer_traces && in_filter ) {
@@ -1565,10 +1570,19 @@ void mongo_db_plugin_impl::init() {
             account_controls.create_index(
                   bsoncxx::from_json( R"xxx({ "controlled_account" : 1, "controlled_permission" : 1 })xxx" ));
             account_controls.create_index( bsoncxx::from_json( R"xxx({ "controlling_account" : 1 })xxx" ));
-
          } catch (...) {
             handle_mongo_exception( "create indexes", __LINE__ );
          }
+      }
+      try {
+         // read account filters
+         auto account_filters = mongo_conn[db_name][account_filters_col];
+         auto account_filters_cursor = account_filters.find({});
+         for(auto doc : account_filters_cursor) {
+            filter_accounts.insert(doc["account"].get_utf8().value.to_string());
+         }
+      } catch (...) {
+         handle_mongo_exception("mongo account filters init", __LINE__);
       }
    } catch (...) {
       handle_mongo_exception( "mongo init", __LINE__ );
