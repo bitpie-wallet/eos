@@ -920,6 +920,7 @@ mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_tr
    bool added = false;
    const bool in_filter = (store_transfer_traces || store_transaction_traces) && start_block_reached &&
          (atrace.act.name == name("transfer")) &&
+         (atrace.producer_block_id.valid()) &&
          (act_digests.find( atrace.receipt.act_digest ) == act_digests.end()) &&
          (atrace.producer_block_id.valid()) &&
          filter_include( atrace.receipt.receiver ) &&
