@@ -153,6 +153,7 @@ public:
    mongocxx::collection _trans_traces;
    mongocxx::collection _action_traces;
    mongocxx::collection _transfer_traces;
+   mongocxx::collection _account_filters;
    mongocxx::collection _block_states;
    mongocxx::collection _blocks;
    mongocxx::collection _pub_keys;
@@ -218,7 +219,8 @@ public:
    std::set<name> filter_accounts;
    boost::shared_mutex filter_mutex;
    int32_t filter_on_accounts(const vector<chain::account_name> &account_names);
-   bool filter_include( const account_name& receiver ) const;
+   bool filter_receiver_include( const account_name& receiver );
+   static const std::string account_key;
 };
 
 const action_name mongo_db_plugin_impl::newaccount = chain::newaccount::get_name();
@@ -238,6 +240,8 @@ const std::string mongo_db_plugin_impl::account_filters_col = "account_filters";
 const std::string mongo_db_plugin_impl::accounts_col = "accounts";
 const std::string mongo_db_plugin_impl::pub_keys_col = "pub_keys";
 const std::string mongo_db_plugin_impl::account_controls_col = "account_controls";
+
+const std::string mongo_db_plugin_impl::account_key = "account";
 
 bool mongo_db_plugin_impl::filter_include( const account_name& receiver, const action_name& act_name,
                                            const vector<chain::permission_level>& authorization ) const
@@ -305,26 +309,14 @@ bool mongo_db_plugin_impl::filter_include( const transaction& trx ) const
    return true;
 }
 
-bool mongo_db_plugin_impl::filter_include( const account_name& receiver ) const
+bool mongo_db_plugin_impl::filter_receiver_include( const account_name& receiver )
 {
+   boost::shared_lock<boost::shared_mutex> rlock(filter_mutex);
    if (filter_accounts.empty())
       return true;
    if (filter_accounts.find(receiver) == filter_accounts.end())
       return false;
    return true;
-}
-
-int32_t mongo_db_plugin_impl::filter_on_accounts(const vector<chain::account_name> &account_names) {
-   int cnt = 0;
-   filter_mutex.lock();
-   for (auto const &account_name : account_names) {
-      auto r = filter_accounts.insert(account_name);
-      if (r.second)
-         ++cnt;
-   }
-   filter_mutex.unlock();
-   ilog( "filter_on_accounts, new accounts: ${cnt}", ("cnt", cnt) );
-   return cnt;
 }
 
 template<typename Queue, typename Entry>
@@ -440,6 +432,7 @@ void mongo_db_plugin_impl::consume_blocks() {
       _trans_traces = mongo_conn[db_name][trans_traces_col];
       _action_traces = mongo_conn[db_name][action_traces_col];
       _transfer_traces = mongo_conn[db_name][transfer_traces_col];
+      _account_filters = mongo_conn[db_name][account_filters_col];
       _blocks = mongo_conn[db_name][blocks_col];
       _block_states = mongo_conn[db_name][block_states_col];
       _pub_keys = mongo_conn[db_name][pub_keys_col];
@@ -923,7 +916,7 @@ mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_tr
          (atrace.producer_block_id.valid()) &&
          (act_digests.find( atrace.receipt.act_digest ) == act_digests.end()) &&
          (atrace.producer_block_id.valid()) &&
-         filter_include( atrace.receipt.receiver ) &&
+         filter_receiver_include( atrace.receipt.receiver ) &&
                           filter_include( atrace.receipt.receiver, atrace.act.name, atrace.act.authorization );
    if( start_block_reached && store_transfer_traces && in_filter ) {
       auto transfer_traces_doc = bsoncxx::builder::basic::document{};
@@ -1477,6 +1470,45 @@ mongo_db_plugin_impl::~mongo_db_plugin_impl() {
    }
 }
 
+
+int32_t mongo_db_plugin_impl::filter_on_accounts(const vector<chain::account_name> &account_names) {
+   using namespace bsoncxx::types;
+   using bsoncxx::builder::basic::kvp;
+
+   mongocxx::options::bulk_write bulk_opts;
+   bulk_opts.ordered(false);
+   mongocxx::bulk_write bulk_write_accounts = _account_filters.create_bulk_write(bulk_opts);
+
+   int cnt = 0;
+   {
+      boost::unique_lock<boost::shared_mutex> wlock(filter_mutex);
+      for (auto const &account_name : account_names) {
+         auto r = filter_accounts.insert(account_name);
+         if (r.second) {
+            ++cnt;
+            // write to mongodb
+            auto account_filter_doc = bsoncxx::builder::basic::document{};
+            account_filter_doc.append(kvp(account_key, account_name.to_string()));
+            mongocxx::model::insert_one insert_op{account_filter_doc.view()};
+            bulk_write_accounts.append(insert_op);
+         }
+      }
+   }
+   ilog( "filter_on_accounts, new accounts: ${cnt}", ("cnt", cnt) );
+
+   if (cnt > 0) {
+      try {
+         if( !bulk_write_accounts.execute() ) {
+            EOS_ASSERT( false, chain::mongo_db_insert_fail,
+                        "Bulk account filters insert failed" );
+         }
+      } catch( ... ) {
+         handle_mongo_exception( "account filters insert", __LINE__ );
+      }
+   }
+   return cnt;
+}
+
 void mongo_db_plugin_impl::wipe_database() {
    ilog("mongo db wipe_database");
 
@@ -1579,8 +1611,9 @@ void mongo_db_plugin_impl::init() {
          // read account filters
          auto account_filters = mongo_conn[db_name][account_filters_col];
          auto account_filters_cursor = account_filters.find({});
+         boost::unique_lock<boost::shared_mutex> wlock(filter_mutex);
          for(auto doc : account_filters_cursor) {
-            filter_accounts.insert(doc["account"].get_utf8().value.to_string());
+            filter_accounts.insert(doc[account_key].get_utf8().value.to_string());
          }
       } catch (...) {
          handle_mongo_exception("mongo account filters init", __LINE__);
