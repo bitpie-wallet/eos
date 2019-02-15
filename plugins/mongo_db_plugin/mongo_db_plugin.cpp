@@ -104,7 +104,6 @@ public:
    bool add_transfer_trace( mongocxx::bulk_write& bulk_action_traces, const chain::action_trace& atrace,
                           const chain::transaction_trace_ptr& t,
                           bool executed, const std::chrono::milliseconds& now,
-                          bool& write_ttrace,
                           std::set<chain::digest_type>& act_digests);
 
    void update_account(const chain::action& act);
@@ -905,7 +904,6 @@ bool
 mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_traces, const chain::action_trace& atrace,
                                         const chain::transaction_trace_ptr& t,
                                         bool executed, const std::chrono::milliseconds& now,
-                                        bool& write_ttrace,
                                         std::set<chain::digest_type>& act_digests)
 {
    using namespace bsoncxx::types;
@@ -921,7 +919,6 @@ mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_tr
          (act_digests.find( atrace.receipt.act_digest ) == act_digests.end()) &&
          filter_include( atrace.receipt.receiver ) &&
                           filter_include( atrace.receipt.receiver, atrace.act.name, atrace.act.authorization );
-   write_ttrace |= in_filter;
    if( start_block_reached && store_transfer_traces && in_filter ) {
       auto transfer_traces_doc = bsoncxx::builder::basic::document{};
       const chain::base_action_trace& base = atrace; // without inline action traces
@@ -958,7 +955,7 @@ mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_tr
    }
 
    for( const auto& iline_atrace : atrace.inline_traces ) {
-      added |= add_action_trace( bulk_transfer_traces, iline_atrace, t, executed, now, write_ttrace );
+      added |= add_transfer_trace( bulk_transfer_traces, iline_atrace, t, executed, now, act_digests );
    }
 
    return added;
@@ -987,7 +984,7 @@ void mongo_db_plugin_impl::_process_applied_transaction( const chain::transactio
    for( const auto& atrace : t->action_traces ) {
       try {
          write_atraces |= add_action_trace( bulk_action_traces, atrace, t, executed, now, write_ttrace );
-         write_transfer_traces |= add_transfer_trace( bulk_transfer_traces, atrace, t, executed, now, write_ttrace, act_digests );
+         write_transfer_traces |= add_transfer_trace( bulk_transfer_traces, atrace, t, executed, now, act_digests );
       } catch(...) {
          handle_mongo_exception("add action traces", __LINE__);
       }
