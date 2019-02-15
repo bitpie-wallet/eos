@@ -231,6 +231,7 @@ public:
        ilog( "filter_on_accounts, new accounts: ${cnt}", ("cnt", cnt) );
        return cnt;
    }
+   bool filter_include( const account_name& receiver ) const;
 };
 
 const action_name mongo_db_plugin_impl::newaccount = chain::newaccount::get_name();
@@ -316,6 +317,14 @@ bool mongo_db_plugin_impl::filter_include( const transaction& trx ) const
    return true;
 }
 
+bool mongo_db_plugin_impl::filter_include( const account_name& receiver ) const
+{
+   if (filter_accounts.empty())
+      return true;
+   if (filter_accounts.find(receiver) == filter_accounts.end())
+      return false;
+   return true;
+}
 
 template<typename Queue, typename Entry>
 void mongo_db_plugin_impl::queue( Queue& queue, const Entry& e ) {
@@ -917,7 +926,8 @@ mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_tr
    bool added = false;
    const bool in_filter = (store_transfer_traces || store_transaction_traces) && start_block_reached &&
          (atrace.act.name == name("transfer")) &&
-         (act_digests.find(atrace.receipt.act_digest) == act_digests.end()) &&
+         (act_digests.find( atrace.receipt.act_digest ) == act_digests.end()) &&
+         filter_include( atrace.receipt.receiver ) &&
                           filter_include( atrace.receipt.receiver, atrace.act.name, atrace.act.authorization );
    write_ttrace |= in_filter;
    if( start_block_reached && store_transfer_traces && in_filter ) {
