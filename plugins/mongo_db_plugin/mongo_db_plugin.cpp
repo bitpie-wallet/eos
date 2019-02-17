@@ -314,8 +314,6 @@ bool mongo_db_plugin_impl::filter_include( const transaction& trx ) const
 bool mongo_db_plugin_impl::filter_receiver_include( const account_name& receiver )
 {
    boost::shared_lock<boost::shared_mutex> rlock(filter_mutex);
-   if (filter_accounts.empty())
-      return true;
    if (filter_accounts.find(receiver) == filter_accounts.end())
       return false;
    return true;
