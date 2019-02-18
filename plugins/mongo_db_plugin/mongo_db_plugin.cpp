@@ -1636,6 +1636,7 @@ void mongo_db_plugin_impl::init() {
             // action traces indexes
             auto transfer_traces = mongo_conn[db_name][transfer_traces_col];
             transfer_traces.create_index( bsoncxx::from_json( R"xxx({ "block_num" : 1 })xxx" ));
+            transfer_traces.create_index( bsoncxx::from_json( R"xxx({ "receipt.receiver" : 1 })xxx" ));
 
             // pub_keys indexes
             auto pub_keys = mongo_conn[db_name][pub_keys_col];
