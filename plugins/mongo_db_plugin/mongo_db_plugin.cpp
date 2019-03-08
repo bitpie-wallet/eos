@@ -103,8 +103,7 @@ public:
 
    bool add_transfer_trace( mongocxx::bulk_write& bulk_action_traces, const chain::action_trace& atrace,
                           const chain::transaction_trace_ptr& t,
-                          bool executed, const std::chrono::milliseconds& now,
-                          std::set<chain::digest_type>& act_digests);
+                          bool executed, const std::chrono::milliseconds& now);
 
    void update_account(const chain::action& act);
 
@@ -898,8 +897,7 @@ mongo_db_plugin_impl::add_action_trace( mongocxx::bulk_write& bulk_action_traces
 bool
 mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_traces, const chain::action_trace& atrace,
                                         const chain::transaction_trace_ptr& t,
-                                        bool executed, const std::chrono::milliseconds& now,
-                                        std::set<chain::digest_type>& act_digests)
+                                        bool executed, const std::chrono::milliseconds& now)
 {
    using namespace bsoncxx::types;
    using bsoncxx::builder::basic::kvp;
@@ -912,7 +910,6 @@ mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_tr
    const bool in_filter = (store_transfer_traces || store_transaction_traces) && start_block_reached &&
          (atrace.act.name == name("transfer")) &&
          (atrace.producer_block_id.valid()) &&
-         (act_digests.find( atrace.receipt.act_digest ) == act_digests.end()) &&
          (atrace.producer_block_id.valid()) &&
          filter_receiver_include( atrace.receipt.receiver ) &&
                           filter_include( atrace.receipt.receiver, atrace.act.name, atrace.act.authorization );
@@ -948,11 +945,10 @@ mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_tr
       mongocxx::model::insert_one insert_op{transfer_traces_doc.view()};
       bulk_transfer_traces.append( insert_op );
       added = true;
-      act_digests.insert(atrace.receipt.act_digest);
    }
 
    for( const auto& iline_atrace : atrace.inline_traces ) {
-      added |= add_transfer_trace( bulk_transfer_traces, iline_atrace, t, executed, now, act_digests );
+      added |= add_transfer_trace( bulk_transfer_traces, iline_atrace, t, executed, now );
    }
 
    return added;
@@ -973,7 +969,6 @@ void mongo_db_plugin_impl::_process_applied_transaction( const chain::transactio
    bool write_atraces = false;
    mongocxx::bulk_write bulk_transfer_traces = _transfer_traces.create_bulk_write(bulk_opts);
    bool write_transfer_traces = false;
-   std::set<chain::digest_type> act_digests;
 
    bool write_ttrace = false; // filters apply to transaction_traces as well
    bool executed = t->receipt.valid() && t->receipt->status == chain::transaction_receipt_header::executed;
@@ -981,7 +976,7 @@ void mongo_db_plugin_impl::_process_applied_transaction( const chain::transactio
    for( const auto& atrace : t->action_traces ) {
       try {
          write_atraces |= add_action_trace( bulk_action_traces, atrace, t, executed, now, write_ttrace );
-         write_transfer_traces |= add_transfer_trace( bulk_transfer_traces, atrace, t, executed, now, act_digests );
+         write_transfer_traces |= add_transfer_trace( bulk_transfer_traces, atrace, t, executed, now );
       } catch(...) {
          handle_mongo_exception("add action traces", __LINE__);
       }
