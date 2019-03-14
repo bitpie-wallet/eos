@@ -931,7 +931,7 @@ mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_tr
 
    bool added = false;
    const bool is_transfer = atrace.act.name == name("transfer");
-   const bool is_system_act = act_filter_include( atrace.receipt.receiver, atrace.act.name );
+   const bool is_system_act = act_filter_include( atrace.act.account, atrace.act.name );
    const bool in_filter = (store_transfer_traces || store_transaction_traces) && start_block_reached &&
          (is_transfer || is_system_act) &&
          (atrace.producer_block_id.valid()) &&
