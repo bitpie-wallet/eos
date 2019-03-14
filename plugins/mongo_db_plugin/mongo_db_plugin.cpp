@@ -1833,7 +1833,7 @@ void mongo_db_plugin::plugin_initialize(const variables_map& options)
             my->store_transfer_traces = options.at( "mongodb-store-transfer-traces" ).as<bool>();
          }
          // initialized act-filter-on
-         static const vector<string> preconfig_act_filter = {
+         vector<string> act_filter_on = {
                "eosio:buyram:",
                "eosio:sellram:",
                "eosio:delegatebw:",
@@ -1844,14 +1844,15 @@ void mongo_db_plugin::plugin_initialize(const variables_map& options)
          };
          if( options.count( "mongodb-act-filter-on" )) {
             auto fo = options.at( "mongodb-act-filter-on" ).as<vector<string>>();
-            fo.insert(fo.begin(), preconfig_act_filter.begin(), preconfig_act_filter.end());
-            for( auto& s : fo ) {
-               std::vector<std::string> v;
-               boost::split( v, s, boost::is_any_of( ":" ));
-               EOS_ASSERT( v.size() == 3, fc::invalid_arg_exception, "Invalid value ${s} for --mongodb-act-filter-on", ("s", s));
-               filter_entry fe{v[0], v[1], v[2]};
-               my->act_filter_on.insert( fe );
-            }
+            act_filter_on.insert(std::end(act_filter_on), std::begin(fo), std::end(fo));
+         }
+         for( auto& s : act_filter_on ) {
+            std::vector<std::string> v;
+            boost::split( v, s, boost::is_any_of( ":" ));
+            EOS_ASSERT( v.size() == 3, fc::invalid_arg_exception, "Invalid value ${s} for --mongodb-act-filter-on", ("s", s));
+            filter_entry fe{v[0], v[1], v[2]};
+            my->act_filter_on.insert( fe );
+            ilog("added act filter ${code}:${act}", ("code", v[0])("act", v[1]));
          }
          if( options.count( "mongodb-filter-on" )) {
             auto fo = options.at( "mongodb-filter-on" ).as<vector<string>>();
