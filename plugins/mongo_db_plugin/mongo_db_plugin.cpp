@@ -103,7 +103,8 @@ public:
 
    bool add_transfer_trace( mongocxx::bulk_write& bulk_action_traces, mongocxx::bulk_write& bulk_act_traces, const chain::action_trace& atrace,
                           const chain::transaction_trace_ptr& t,
-                          bool executed, const std::chrono::milliseconds& now);
+                          bool executed, const std::chrono::milliseconds& now,
+                          bool& write_act_traces);
 
    void update_account(const chain::action& act);
 
@@ -924,7 +925,8 @@ mongo_db_plugin_impl::add_action_trace( mongocxx::bulk_write& bulk_action_traces
 bool
 mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_traces, mongocxx::bulk_write& bulk_act_traces, const chain::action_trace& atrace,
                                         const chain::transaction_trace_ptr& t,
-                                        bool executed, const std::chrono::milliseconds& now)
+                                        bool executed, const std::chrono::milliseconds& now,
+                                        bool& write_act_traces)
 {
    using namespace bsoncxx::types;
    using bsoncxx::builder::basic::kvp;
@@ -934,6 +936,7 @@ mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_tr
    }
 
    bool added = false;
+   write_act_traces = false;
    const bool is_transfer = atrace.act.name == name("transfer");
    const bool is_system_act = act_filter_include( atrace.act.account, atrace.act.name );
    const bool in_filter = (store_transfer_traces || store_transaction_traces) && start_block_reached &&
@@ -972,15 +975,19 @@ mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_tr
       transfer_traces_doc.append( kvp( "createdAt", b_date{now} ) );
 
       mongocxx::model::insert_one insert_op{transfer_traces_doc.view()};
-      if (is_transfer)
-         bulk_transfer_traces.append( insert_op );
-      else
-         bulk_act_traces.append( insert_op );
-      added = true;
+      if (is_transfer) {
+         bulk_transfer_traces.append(insert_op);
+         added = true;
+      } else {
+         bulk_act_traces.append(insert_op);
+         write_act_traces = true;
+      }
    }
 
    for( const auto& iline_atrace : atrace.inline_traces ) {
-      added |= add_transfer_trace( bulk_transfer_traces, bulk_act_traces, iline_atrace, t, executed, now );
+      bool write_act_traces_next;
+      added |= add_transfer_trace( bulk_transfer_traces, bulk_act_traces, iline_atrace, t, executed, now, write_act_traces_next );
+      write_act_traces |= write_act_traces_next;
    }
 
    return added;
@@ -1002,6 +1009,7 @@ void mongo_db_plugin_impl::_process_applied_transaction( const chain::transactio
    mongocxx::bulk_write bulk_transfer_traces = _transfer_traces.create_bulk_write(bulk_opts);
    mongocxx::bulk_write bulk_act_traces = _act_traces.create_bulk_write(bulk_opts);
    bool write_transfer_traces = false;
+   bool write_act_traces = false;
 
    bool write_ttrace = false; // filters apply to transaction_traces as well
    bool executed = t->receipt.valid() && t->receipt->status == chain::transaction_receipt_header::executed;
@@ -1009,7 +1017,7 @@ void mongo_db_plugin_impl::_process_applied_transaction( const chain::transactio
    for( const auto& atrace : t->action_traces ) {
       try {
          write_atraces |= add_action_trace( bulk_action_traces, atrace, t, executed, now, write_ttrace );
-         write_transfer_traces |= add_transfer_trace( bulk_transfer_traces, bulk_act_traces, atrace, t, executed, now );
+         write_transfer_traces |= add_transfer_trace( bulk_transfer_traces, bulk_act_traces, atrace, t, executed, now, write_act_traces );
       } catch(...) {
          handle_mongo_exception("add action traces", __LINE__);
       }
@@ -1066,13 +1074,15 @@ void mongo_db_plugin_impl::_process_applied_transaction( const chain::transactio
    // insert transfer_traces
    if( write_transfer_traces ) {
       try {
-         if( !bulk_transfer_traces.execute() ) {
-            EOS_ASSERT( false, chain::mongo_db_insert_fail,
-                        "Bulk transfer traces insert failed for transaction trace: ${id}", ("id", t->id) );
+         if (!bulk_transfer_traces.execute()) {
+            EOS_ASSERT(false, chain::mongo_db_insert_fail,
+                       "Bulk transfer traces insert failed for transaction trace: ${id}", ("id", t->id));
          }
-      } catch( ... ) {
-         handle_mongo_exception( "transfer traces insert", __LINE__ );
+      } catch (...) {
+         handle_mongo_exception("transfer traces insert", __LINE__);
       }
+   }
+   if ( write_act_traces ) {
       try {
          if( !bulk_act_traces.execute() ) {
             EOS_ASSERT( false, chain::mongo_db_insert_fail,
