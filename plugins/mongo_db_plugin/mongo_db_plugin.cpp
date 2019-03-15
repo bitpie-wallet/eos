@@ -1082,10 +1082,10 @@ void mongo_db_plugin_impl::_process_applied_transaction( const chain::transactio
       try {
          if( !bulk_act_traces.execute() ) {
             EOS_ASSERT( false, chain::mongo_db_insert_fail,
-                        "Bulk transfer traces insert failed for transaction trace: ${id}", ("id", t->id) );
+                        "Bulk act traces insert failed for transaction trace: ${id}", ("id", t->id) );
          }
       } catch( ... ) {
-         handle_mongo_exception( "transfer traces insert", __LINE__ );
+         handle_mongo_exception( "act traces insert", __LINE__ );
       }
    }
 }
