@@ -21,6 +21,8 @@
 #include <thread>
 #include <mutex>
 
+#include <boost/thread/thread.hpp>
+
 #include <bsoncxx/builder/basic/kvp.hpp>
 #include <bsoncxx/builder/basic/document.hpp>
 #include <bsoncxx/exception/exception.hpp>
