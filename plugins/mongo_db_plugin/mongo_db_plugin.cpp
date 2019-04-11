@@ -223,7 +223,7 @@ public:
    chain_plugin*          chain_plug = nullptr;
 
    std::set<name> filter_accounts;
-   boost::shared_mutex filter_mutex;
+   std::shared_mutex filter_mutex;
    int32_t filter_on_accounts(const vector<chain::account_name> &account_names);
    bool filter_receiver_include( const account_name& receiver );
    static const std::string account_key;
@@ -318,7 +318,7 @@ bool mongo_db_plugin_impl::filter_include( const transaction& trx ) const
 
 bool mongo_db_plugin_impl::filter_receiver_include( const account_name& receiver )
 {
-   boost::shared_lock<boost::shared_mutex> rlock(filter_mutex);
+   boost::shared_lock<std::shared_mutex> rlock(filter_mutex);
    if (filter_accounts.find(receiver) == filter_accounts.end())
       return false;
    return true;
@@ -1523,7 +1523,7 @@ int32_t mongo_db_plugin_impl::filter_on_accounts(const vector<chain::account_nam
 
    int cnt = 0;
    {
-      boost::unique_lock<boost::shared_mutex> wlock(filter_mutex);
+      std::unique_lock<std::shared_mutex> wlock(filter_mutex);
       for (auto const &account_name : account_names) {
          auto r = filter_accounts.insert(account_name);
          if (r.second) {
@@ -1716,7 +1716,7 @@ void mongo_db_plugin_impl::init() {
          // read account filters
          auto account_filters = mongo_conn[db_name][account_filters_col];
          auto account_filters_cursor = account_filters.find({});
-         boost::unique_lock<boost::shared_mutex> wlock(filter_mutex);
+         std::unique_lock<std::shared_mutex> wlock(filter_mutex);
          for(auto doc : account_filters_cursor) {
             filter_accounts.insert(doc[account_key].get_utf8().value.to_string());
          }
