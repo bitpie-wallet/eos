@@ -21,6 +21,7 @@
 #include <queue>
 #include <thread>
 #include <mutex>
+#include <shared_mutex>
 
 #include <bsoncxx/builder/basic/kvp.hpp>
 #include <bsoncxx/builder/basic/document.hpp>
@@ -318,7 +319,7 @@ bool mongo_db_plugin_impl::filter_include( const transaction& trx ) const
 
 bool mongo_db_plugin_impl::filter_receiver_include( const account_name& receiver )
 {
-   boost::shared_lock<std::shared_mutex> rlock(filter_mutex);
+   std::shared_lock<std::shared_mutex> rlock(filter_mutex);
    if (filter_accounts.find(receiver) == filter_accounts.end())
       return false;
    return true;
@@ -934,27 +935,25 @@ mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_tr
    using namespace bsoncxx::types;
    using bsoncxx::builder::basic::kvp;
 
-   if( executed && atrace.receipt.receiver == chain::config::system_account_name ) {
+   if( executed && atrace.receipt->receiver == chain::config::system_account_name ) {
       update_account( atrace.act );
    }
 
    unsigned added = 0;
-   const bool is_transfer = (atrace.act.name == name("transfer")) && filter_receiver_include( atrace.receipt.receiver );
+   const bool is_transfer = (atrace.act.name == name("transfer")) && filter_receiver_include( atrace.receipt->receiver );
    const bool is_system_act = act_filter_include( atrace.act.account, atrace.act.name, atrace.act.authorization );
    const bool in_filter = (store_transfer_traces || store_transaction_traces) && start_block_reached &&
          (is_transfer || is_system_act) &&
          (atrace.producer_block_id.valid()) &&
          (atrace.producer_block_id.valid()) &&
-                          filter_include( atrace.receipt.receiver, atrace.act.name, atrace.act.authorization );
+                          filter_include( atrace.receipt->receiver, atrace.act.name, atrace.act.authorization );
    if( start_block_reached && store_transfer_traces && in_filter ) {
       auto transfer_traces_doc = bsoncxx::builder::basic::document{};
-      const chain::base_action_trace& base = atrace; // without inline action traces
-
       // improve data distributivity when using mongodb sharding
       transfer_traces_doc.append( kvp( "_id", make_custom_oid() ) );
 
       auto& chain = chain_plug->chain();
-      auto v = chain.to_variant_with_abi(base, abi_serializer_max_time);   // to_variant_with_abi( base );
+      auto v = chain.to_variant_with_abi(atrace, abi_serializer_max_time);   // to_variant_with_abi( base );
       string json = fc::json::to_string( v );
       try {
          const auto& value = bsoncxx::from_json( json );
@@ -983,10 +982,6 @@ mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_tr
          bulk_act_traces.append(insert_op);
          added = BULK_ACT_ADDED;
       }
-   }
-
-   for( const auto& iline_atrace : atrace.inline_traces ) {
-      added |= add_transfer_trace( bulk_transfer_traces, bulk_act_traces, iline_atrace, t, executed, now );
    }
 
    return added;
@@ -1841,6 +1836,7 @@ void mongo_db_plugin::plugin_initialize(const variables_map& options)
          }
          if( options.count( "mongodb-expire-after-seconds" )) {
             my->expire_after_seconds = options.at( "mongodb-expire-after-seconds" ).as<uint32_t>();
+         }
          if( options.count( "mongodb-store-transfer-traces" )) {
             my->store_transfer_traces = options.at( "mongodb-store-transfer-traces" ).as<bool>();
          }
