@@ -101,6 +101,11 @@ public:
                           bool executed, const std::chrono::milliseconds& now,
                           bool& write_ttrace );
 
+   bool add_transfer_trace( mongocxx::bulk_write& bulk_action_traces, const chain::action_trace& atrace,
+                          const chain::transaction_trace_ptr& t,
+                          bool executed, const std::chrono::milliseconds& now,
+                          bool& write_ttrace );
+
    void update_account(const chain::action& act);
 
    void add_pub_keys( const vector<chain::key_weight>& keys, const account_name& name,
@@ -138,6 +143,7 @@ public:
    bool store_transaction_traces = true;
    bool store_action_traces = true;
    uint32_t expire_after_seconds = 0;
+   bool store_transfer_traces = true;
 
    std::string db_name;
    mongocxx::instance mongo_inst;
@@ -148,6 +154,7 @@ public:
    mongocxx::collection _trans;
    mongocxx::collection _trans_traces;
    mongocxx::collection _action_traces;
+   mongocxx::collection _transfer_traces;
    mongocxx::collection _block_states;
    mongocxx::collection _blocks;
    mongocxx::collection _pub_keys;
@@ -202,6 +209,7 @@ public:
    static const std::string trans_col;
    static const std::string trans_traces_col;
    static const std::string action_traces_col;
+   static const std::string transfer_traces_col;
    static const std::string accounts_col;
    static const std::string pub_keys_col;
    static const std::string account_controls_col;
@@ -234,6 +242,7 @@ const std::string mongo_db_plugin_impl::blocks_col = "blocks";
 const std::string mongo_db_plugin_impl::trans_col = "transactions";
 const std::string mongo_db_plugin_impl::trans_traces_col = "transaction_traces";
 const std::string mongo_db_plugin_impl::action_traces_col = "action_traces";
+const std::string mongo_db_plugin_impl::transfer_traces_col = "transfer_traces";
 const std::string mongo_db_plugin_impl::accounts_col = "accounts";
 const std::string mongo_db_plugin_impl::pub_keys_col = "pub_keys";
 const std::string mongo_db_plugin_impl::account_controls_col = "account_controls";
@@ -417,6 +426,7 @@ void mongo_db_plugin_impl::consume_blocks() {
       _trans = mongo_conn[db_name][trans_col];
       _trans_traces = mongo_conn[db_name][trans_traces_col];
       _action_traces = mongo_conn[db_name][action_traces_col];
+      _transfer_traces = mongo_conn[db_name][transfer_traces_col];
       _blocks = mongo_conn[db_name][blocks_col];
       _block_states = mongo_conn[db_name][block_states_col];
       _pub_keys = mongo_conn[db_name][pub_keys_col];
@@ -887,6 +897,62 @@ mongo_db_plugin_impl::add_action_trace( mongocxx::bulk_write& bulk_action_traces
    return added;
 }
 
+bool
+mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_traces, const chain::action_trace& atrace,
+                                        const chain::transaction_trace_ptr& t,
+                                        bool executed, const std::chrono::milliseconds& now,
+                                        bool& write_ttrace )
+{
+   using namespace bsoncxx::types;
+   using bsoncxx::builder::basic::kvp;
+
+   if( executed && atrace.receipt.receiver == chain::config::system_account_name ) {
+      update_account( atrace.act );
+   }
+
+   bool added = false;
+   const bool in_filter = (store_action_traces || store_transaction_traces) && start_block_reached &&
+                          filter_include( atrace.receipt.receiver, atrace.act.name, atrace.act.authorization );
+   write_ttrace |= in_filter;
+   if( start_block_reached && store_action_traces && in_filter ) {
+      auto transfer_traces_doc = bsoncxx::builder::basic::document{};
+      const chain::base_action_trace& base = atrace; // without inline action traces
+
+      // improve data distributivity when using mongodb sharding
+      transfer_traces_doc.append( kvp( "_id", make_custom_oid() ) );
+
+      auto v = to_variant_with_abi( base );
+      string json = fc::json::to_string( v );
+      try {
+         const auto& value = bsoncxx::from_json( json );
+         transfer_traces_doc.append( bsoncxx::builder::concatenate_doc{value.view()} );
+      } catch( bsoncxx::exception& ) {
+         try {
+            json = fc::prune_invalid_utf8( json );
+            const auto& value = bsoncxx::from_json( json );
+            transfer_traces_doc.append( bsoncxx::builder::concatenate_doc{value.view()} );
+            transfer_traces_doc.append( kvp( "non-utf8-purged", b_bool{true} ) );
+         } catch( bsoncxx::exception& e ) {
+            elog( "Unable to convert action trace JSON to MongoDB JSON: ${e}", ("e", e.what()) );
+            elog( "  JSON: ${j}", ("j", json) );
+         }
+      }
+      if( t->receipt.valid() ) {
+         transfer_traces_doc.append( kvp( "trx_status", std::string( t->receipt->status ) ) );
+      }
+      transfer_traces_doc.append( kvp( "createdAt", b_date{now} ) );
+
+      mongocxx::model::insert_one insert_op{transfer_traces_doc.view()};
+      bulk_transfer_traces.append( insert_op );
+      added = true;
+   }
+
+   for( const auto& iline_atrace : atrace.inline_traces ) {
+      added |= add_action_trace( bulk_transfer_traces, iline_atrace, t, executed, now, write_ttrace );
+   }
+
+   return added;
+}
 
 void mongo_db_plugin_impl::_process_applied_transaction( const chain::transaction_trace_ptr& t ) {
    using namespace bsoncxx::types;
@@ -901,12 +967,15 @@ void mongo_db_plugin_impl::_process_applied_transaction( const chain::transactio
    bulk_opts.ordered(false);
    mongocxx::bulk_write bulk_action_traces = _action_traces.create_bulk_write(bulk_opts);
    bool write_atraces = false;
+   mongocxx::bulk_write bulk_transfer_traces = _transfer_traces.create_bulk_write(bulk_opts);
+   bool write_transfer_traces = false;
    bool write_ttrace = false; // filters apply to transaction_traces as well
    bool executed = t->receipt.valid() && t->receipt->status == chain::transaction_receipt_header::executed;
 
    for( const auto& atrace : t->action_traces ) {
       try {
          write_atraces |= add_action_trace( bulk_action_traces, atrace, t, executed, now, write_ttrace );
+         write_transfer_traces |= add_transfer_trace( bulk_transfer_traces, atrace, t, executed, now, write_ttrace );
       } catch(...) {
          handle_mongo_exception("add action traces", __LINE__);
       }
@@ -960,6 +1029,17 @@ void mongo_db_plugin_impl::_process_applied_transaction( const chain::transactio
       }
    }
 
+   // insert transfer_traces
+   if( write_transfer_traces ) {
+      try {
+         if( !bulk_transfer_traces.execute() ) {
+            EOS_ASSERT( false, chain::mongo_db_insert_fail,
+                        "Bulk transfer traces insert failed for transaction trace: ${id}", ("id", t->id) );
+         }
+      } catch( ... ) {
+         handle_mongo_exception( "transfer traces insert", __LINE__ );
+      }
+   }
 }
 
 void mongo_db_plugin_impl::_process_accepted_block( const chain::block_state_ptr& bs ) {
@@ -1393,6 +1473,7 @@ void mongo_db_plugin_impl::wipe_database() {
    auto trans = mongo_conn[db_name][trans_col];
    auto trans_traces = mongo_conn[db_name][trans_traces_col];
    auto action_traces = mongo_conn[db_name][action_traces_col];
+   auto transfer_traces = mongo_conn[db_name][transfer_traces_col];
    auto accounts = mongo_conn[db_name][accounts_col];
    auto pub_keys = mongo_conn[db_name][pub_keys_col];
    auto account_controls = mongo_conn[db_name][account_controls_col];
@@ -1499,6 +1580,10 @@ void mongo_db_plugin_impl::init() {
             auto action_traces = mongo_conn[db_name][action_traces_col];
             action_traces.create_index( bsoncxx::from_json( R"xxx({ "block_num" : 1, "_id" : 1 })xxx" ));
 
+            // action traces indexes
+            auto transfer_traces = mongo_conn[db_name][transfer_traces_col];
+            transfer_traces.create_index( bsoncxx::from_json( R"xxx({ "block_num" : 1 })xxx" ));
+
             // pub_keys indexes
             auto pub_keys = mongo_conn[db_name][pub_keys_col];
             pub_keys.create_index( bsoncxx::from_json( R"xxx({ "account" : 1, "permission" : 1, "_id" : 1 })xxx" ));
@@ -1588,6 +1673,8 @@ void mongo_db_plugin::set_program_options(options_description& cli, options_desc
           "Enables storing action traces in mongodb.")
          ("mongodb-expire-after-seconds", bpo::value<uint32_t>()->default_value(0),
           "Enables expiring data in mongodb after a specified number of seconds.")
+         ("mongodb-store-transfer-traces", bpo::value<bool>()->default_value(true),
+          "Enables storing transfer traces in mongodb.")
          ("mongodb-filter-on", bpo::value<vector<string>>()->composing(),
           "Track actions which match receiver:action:actor. Receiver, Action, & Actor may be blank to include all. i.e. eosio:: or :transfer:  Use * or leave unspecified to include all.")
          ("mongodb-filter-out", bpo::value<vector<string>>()->composing(),
@@ -1647,6 +1734,8 @@ void mongo_db_plugin::plugin_initialize(const variables_map& options)
          }
          if( options.count( "mongodb-expire-after-seconds" )) {
             my->expire_after_seconds = options.at( "mongodb-expire-after-seconds" ).as<uint32_t>();
+         if( options.count( "mongodb-store-transfer-traces" )) {
+            my->store_transfer_traces = options.at( "mongodb-store-transfer-traces" ).as<bool>();
          }
          if( options.count( "mongodb-filter-on" )) {
             auto fo = options.at( "mongodb-filter-on" ).as<vector<string>>();
