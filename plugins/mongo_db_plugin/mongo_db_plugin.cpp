@@ -952,8 +952,7 @@ mongo_db_plugin_impl::add_transfer_trace( mongocxx::bulk_write& bulk_transfer_tr
       // improve data distributivity when using mongodb sharding
       transfer_traces_doc.append( kvp( "_id", make_custom_oid() ) );
 
-      auto& chain = chain_plug->chain();
-      auto v = chain.to_variant_with_abi(atrace, abi_serializer_max_time);   // to_variant_with_abi( base );
+      auto v = to_variant_with_abi( atrace );
       string json = fc::json::to_string( v );
       try {
          const auto& value = bsoncxx::from_json( json );
